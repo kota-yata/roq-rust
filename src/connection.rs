@@ -1,18 +1,47 @@
-use quinn::{Connection, Endpoint};
+use quinn::{ClientConfig, Endpoint, ServerConfig};
+use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
+use std::{error::Error, net::SocketAddr, sync::Arc};
 
-async fn send_rtp_packet(connection: &Connection, packet: RtpPacket) -> Result<(), Box<dyn std::error::Error>> {
-    let mut codec = RoqCodec;
-    let mut buf = BytesMut::new();
+#[allow(unused)]
+pub fn make_client_endpoint(
+  bind_addr: SocketAddr,
+  server_certs: &[&[u8]],
+) -> Result<Endpoint, Box<dyn Error + Send + Sync + 'static>> {
+  let client_cfg = configure_client(server_certs)?;
+  let mut endpoint = Endpoint::client(bind_addr)?;
+  endpoint.set_default_client_config(client_cfg);
+  Ok(endpoint)
+}
 
-    // Encode as datagram
-    codec.encode_datagram(packet, &mut buf);
-    connection.send_datagram(buf.freeze())?;
+fn configure_client(
+server_certs: &[&[u8]],
+) -> Result<ClientConfig, Box<dyn Error + Send + Sync + 'static>> {
+  let mut certs = rustls::RootCertStore::empty();
+  for cert in server_certs {
+    certs.add(CertificateDer::from(*cert))?;
+  }
 
-    // Or encode as stream
-    let mut send_stream = connection.open_uni().await?;
-    codec.encode_stream(packet, &mut buf);
-    send_stream.write_all(&buf).await?;
-    send_stream.finish().await?;
+  Ok(ClientConfig::with_root_certificates(Arc::new(certs))?)
+}
 
-    Ok(())
+#[allow(unused)]
+pub fn make_server_endpoint(
+  bind_addr: SocketAddr,
+) -> Result<(Endpoint, CertificateDer<'static>), Box<dyn Error + Send + Sync + 'static>> {
+  let (server_config, server_cert) = configure_server()?;
+  let endpoint = Endpoint::server(server_config, bind_addr)?;
+  Ok((endpoint, server_cert))
+}
+
+fn configure_server(
+) -> Result<(ServerConfig, CertificateDer<'static>), Box<dyn Error + Send + Sync + 'static>> {
+  let cert = rcgen::generate_simple_self_signed(vec!["localhost".into()]).unwrap();
+  let cert_der = CertificateDer::from(cert.cert);
+  let priv_key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
+
+  let mut server_config = ServerConfig::with_single_cert(vec![cert_der.clone()], priv_key.into())?;
+  let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
+  transport_config.max_concurrent_uni_streams(0_u8.into());
+
+  Ok((server_config, cert_der))
 }
