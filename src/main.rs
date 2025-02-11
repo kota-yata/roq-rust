@@ -4,6 +4,8 @@ use std::{
 };
 
 mod connection;
+mod error;
+mod rtp;
 use connection::{make_client_endpoint, make_server_endpoint};
 
 #[tokio::main]

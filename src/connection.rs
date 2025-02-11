@@ -1,6 +1,9 @@
-use quinn::{ClientConfig, Endpoint, ServerConfig};
+use quinn::{ClientConfig, Endpoint, ServerConfig, TransportConfig};
+use quinn::crypto::rustls::{QuicClientConfig, QuicServerConfig};
 use rustls::pki_types::{CertificateDer, PrivatePkcs8KeyDer};
 use std::{error::Error, net::SocketAddr, sync::Arc};
+
+const ALPN_RTP_OVER_QUIC: &[u8] = b"roq";
 
 #[allow(unused)]
 pub fn make_client_endpoint(
@@ -21,7 +24,20 @@ server_certs: &[&[u8]],
     certs.add(CertificateDer::from(*cert))?;
   }
 
-  Ok(ClientConfig::with_root_certificates(Arc::new(certs))?)
+  let mut client_crypto = rustls::ClientConfig::builder()
+    .with_root_certificates(certs)
+    .with_no_client_auth();
+  client_crypto.alpn_protocols = vec![ALPN_RTP_OVER_QUIC.to_vec()];
+
+  let mut client_config = ClientConfig::new(Arc::new(QuicClientConfig::try_from(client_crypto)?));
+
+  let mut transport = TransportConfig::default();
+  transport.max_concurrent_uni_streams(1024u32.into()); // allow stream
+  transport.datagram_receive_buffer_size(Some(1024)); // allow datagram
+
+  client_config.transport_config(Arc::new(transport));
+
+  Ok(client_config)
 }
 
 #[allow(unused)]
@@ -39,9 +55,18 @@ fn configure_server(
   let cert_der = CertificateDer::from(cert.cert);
   let priv_key = PrivatePkcs8KeyDer::from(cert.key_pair.serialize_der());
 
-  let mut server_config = ServerConfig::with_single_cert(vec![cert_der.clone()], priv_key.into())?;
-  let transport_config = Arc::get_mut(&mut server_config.transport).unwrap();
-  transport_config.max_concurrent_uni_streams(0_u8.into());
+  let mut server_crypto = rustls::ServerConfig::builder()
+    .with_no_client_auth()
+    .with_single_cert(vec![cert_der.clone()], priv_key.into())?;
+  server_crypto.alpn_protocols = vec![ALPN_RTP_OVER_QUIC.to_vec()];
+
+  let mut server_config = ServerConfig::with_crypto(Arc::new(QuicServerConfig::try_from(server_crypto)?));
+
+  let mut transport = TransportConfig::default();
+  transport.max_concurrent_uni_streams(1024u32.into());
+  transport.datagram_receive_buffer_size(Some(1024));
+
+  server_config.transport_config(Arc::new(transport));
 
   Ok((server_config, cert_der))
 }
